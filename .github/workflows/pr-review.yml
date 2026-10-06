@@ -1,0 +1,42 @@
+name: AgentCore PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# OIDC: id-token:write lets the job assume the AWS role without stored keys.
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4   # check for the latest major
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: Invoke AgentCore PR reviewer
+        run: |
+          set -euo pipefail
+          # AgentCore requires a runtime-session-id of >= 33 chars; build and pad one.
+          SESSION_ID="pr-${{ github.event.pull_request.number }}-$(date +%s)-${RANDOM}${RANDOM}"
+          while [ ${#SESSION_ID} -lt 33 ]; do SESSION_ID="${SESSION_ID}0"; done
+
+          printf '{"repo":"%s","pr":%s}' \
+            "${{ github.repository }}" "${{ github.event.pull_request.number }}" > payload.json
+
+          aws bedrock-agentcore invoke-agent-runtime \
+            --agent-runtime-arn "${{ vars.AGENT_RUNTIME_ARN }}" \
+            --runtime-session-id "$SESSION_ID" \
+            --payload fileb://payload.json \
+            --region ap-southeast-2 \
+            response.json
+
+          echo "Session: $SESSION_ID"
+          echo "----- agent response -----"
+          cat response.json
