@@ -17,6 +17,9 @@ on:
       max_parallel:
         description: "Max concurrent reviews (keep low to avoid Bedrock throttling)"
         default: "5"
+      model_id:
+        description: "Bedrock inference profile id (global.* is most reliable)"
+        default: "global.anthropic.claude-opus-5-5"
 
 permissions:
   id-token: write
@@ -89,7 +92,7 @@ jobs:
           sleep 20   # let the just-created PR settle so the review POST doesn't 422
           SESSION_ID="batch-${GITHUB_RUN_ID}-${IDX}-$(date +%s)-${RANDOM}${RANDOM}"
           while [ ${#SESSION_ID} -lt 33 ]; do SESSION_ID="${SESSION_ID}0"; done
-          printf '{"repo":"%s","pr":%s}' "${{ github.repository }}" "$PR_NUMBER" > payload.json
+          printf '{"repo":"%s","pr":%s,"model_id":"%s"}' "${{ github.repository }}" "$PR_NUMBER" "${{ inputs.model_id }}" > payload.json
           aws bedrock-agentcore invoke-agent-runtime \
             --agent-runtime-arn "${{ vars.AGENT_RUNTIME_ARN }}" \
             --runtime-session-id "$SESSION_ID" \
