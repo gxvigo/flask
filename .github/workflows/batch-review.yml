@@ -86,6 +86,7 @@ jobs:
           IDX: ${{ matrix.index }}
         run: |
           set -euo pipefail
+          sleep 20   # let the just-created PR settle so the review POST doesn't 422
           SESSION_ID="batch-${GITHUB_RUN_ID}-${IDX}-$(date +%s)-${RANDOM}${RANDOM}"
           while [ ${#SESSION_ID} -lt 33 ]; do SESSION_ID="${SESSION_ID}0"; done
           printf '{"repo":"%s","pr":%s}' "${{ github.repository }}" "$PR_NUMBER" > payload.json

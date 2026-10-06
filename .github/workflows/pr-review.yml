@@ -13,6 +13,9 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Skip batch-generated PRs — those are reviewed inline by batch-review.yml,
+    # so this avoids double reviews (and double cost) and the approval gate.
+    if: ${{ !startsWith(github.head_ref, 'cost-batch-') }}
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4   # check for the latest major
