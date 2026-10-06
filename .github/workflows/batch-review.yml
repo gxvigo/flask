@@ -1,0 +1,99 @@
+name: Batch Cost Test (fan-out)
+
+# Server-side batch: generates N mixed-complexity PRs and invokes the AgentCore
+# reviewer for each, entirely on GitHub + AWS. Trigger it once, then your laptop
+# can be off. PRs opened by the workflow token do NOT re-trigger pr-review.yml,
+# so this job invokes the reviewer directly (no double reviews).
+#
+# Trigger:
+#   gh workflow run batch-review.yml -R gxvigo/flask -f count=50 -f max_parallel=5
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Number of review jobs to run"
+        default: "50"
+      max_parallel:
+        description: "Max concurrent reviews (keep low to avoid Bedrock throttling)"
+        default: "5"
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        env:
+          COUNT: ${{ inputs.count }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, json
+          n = int(os.environ["COUNT"])
+          mix = ["small", "small", "medium", "medium", "medium", "large"]
+          items = [{"index": i, "size": mix[(i - 1) % len(mix)]} for i in range(1, n + 1)]
+          print("matrix=" + json.dumps({"include": items}))
+          PY
+
+  review:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create synthetic change and PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIZE: ${{ matrix.size }}
+          IDX: ${{ matrix.index }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          case "$SIZE" in small) N=1;; medium) N=4;; large) N=12;; *) N=4;; esac
+          BR="cost-batch-${GITHUB_RUN_ID}-${IDX}-${SIZE}"
+          git config user.name "cost-bot"
+          git config user.email "cost-bot@users.noreply.github.com"
+          git checkout -b "$BR"
+          python3 .github/cost_gen_change.py "$N" > src/flask/_cost_review_demo.py
+          git add src/flask/_cost_review_demo.py
+          git commit -m "cost-batch ${SIZE} #${IDX}"
+          git push -u origin "$BR"
+          PR_URL="$(gh pr create --base "$DEFAULT_BRANCH" --head "$BR" \
+            --title "cost-batch ${SIZE} #${IDX}" --body "size=${SIZE} run=${GITHUB_RUN_ID}")"
+          echo "pr_number=$(gh pr view "$PR_URL" --json number --jq .number)" >> "$GITHUB_OUTPUT"
+
+      - name: AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+
+      - name: Invoke reviewer
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          SIZE: ${{ matrix.size }}
+          IDX: ${{ matrix.index }}
+        run: |
+          set -euo pipefail
+          SESSION_ID="batch-${GITHUB_RUN_ID}-${IDX}-$(date +%s)-${RANDOM}${RANDOM}"
+          while [ ${#SESSION_ID} -lt 33 ]; do SESSION_ID="${SESSION_ID}0"; done
+          printf '{"repo":"%s","pr":%s}' "${{ github.repository }}" "$PR_NUMBER" > payload.json
+          aws bedrock-agentcore invoke-agent-runtime \
+            --agent-runtime-arn "${{ vars.AGENT_RUNTIME_ARN }}" \
+            --runtime-session-id "$SESSION_ID" \
+            --payload fileb://payload.json \
+            --region ap-southeast-2 \
+            response.json
+          echo "PR #$PR_NUMBER (${SIZE})"
+          cat response.json
